@@ -73,6 +73,18 @@ func (a *StaticAccount) validate() error {
 		} else if len(a.TokenGen.Scopes) == 0 {
 			err = multierror.Append(err, fmt.Errorf("access token static account should have defined scopes"))
 		}
+	case SecretTypeIdToken:
+		if a.TokenGen == nil {
+			err = multierror.Append(err, fmt.Errorf("idtoken token static account should have initialized token generator"))
+		} else if len(a.TokenGen.Audience) == 0 {
+			err = multierror.Append(err, fmt.Errorf("idtoken token static account should have defined audience"))
+		}
+	case SecretTypeJwtAccessToken:
+		if a.TokenGen == nil {
+			err = multierror.Append(err, fmt.Errorf("jwtaccess token static account should have initialized token generator"))
+		} else if len(a.TokenGen.Audience) == 0 {
+			err = multierror.Append(err, fmt.Errorf("jwtaccess token static account should have defined audience"))
+		}
 	case SecretTypeKey:
 		break
 	default:
@@ -145,7 +157,7 @@ func (b *backend) createStaticAccount(ctx context.Context, req *logical.Request,
 
 	// Create new token gen if a stubbed tokenGenerator (with scopes) is given.
 	if newResources.tokenGen != nil && len(newResources.tokenGen.Scopes) > 0 {
-		tokenGen, err := b.createNewTokenGen(ctx, req, gcpAcct.Name, newResources.tokenGen.Scopes)
+		tokenGen, err := b.createNewTokenGen(ctx, req, gcpAcct.Name, newResources.tokenGen.Scopes, newResources.tokenGen.Audience)
 		if err != nil {
 			return err
 		}

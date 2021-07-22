@@ -40,6 +40,7 @@ type (
 		KeyName    string
 		B64KeyJSON string
 		Scopes     []string
+		Audience   string
 	}
 )
 
@@ -68,7 +69,7 @@ func getStringHash(bindingsRaw string) string {
 	return base64.StdEncoding.EncodeToString(ssum[:])
 }
 
-func (b *backend) createNewTokenGen(ctx context.Context, req *logical.Request, parent string, scopes []string) (*TokenGenerator, error) {
+func (b *backend) createNewTokenGen(ctx context.Context, req *logical.Request, parent string, scopes []string, audience string) (*TokenGenerator, error) {
 	b.Logger().Debug("creating new TokenGenerator (service account key)", "account", parent, "scopes", scopes)
 
 	iamAdmin, err := b.IAMAdminClient(req.Storage)
@@ -88,6 +89,7 @@ func (b *backend) createNewTokenGen(ctx context.Context, req *logical.Request, p
 		KeyName:    key.Name,
 		B64KeyJSON: key.PrivateKeyData,
 		Scopes:     scopes,
+		Audience:   audience,
 	}, nil
 }
 

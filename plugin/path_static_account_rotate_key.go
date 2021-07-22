@@ -3,6 +3,7 @@ package gcpsecrets
 import (
 	"context"
 	"fmt"
+
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 )
@@ -53,6 +54,7 @@ func (b *backend) pathStaticAccountRotateKey(ctx context.Context, req *logical.R
 		return nil, fmt.Errorf("unexpected invalid account has no TokenGen")
 	}
 
+	audience := acct.TokenGen.Audience
 	scopes := acct.TokenGen.Scopes
 	oldTokenGen := acct.TokenGen
 	oldWalId, err := b.addWalRoleSetServiceAccountKey(ctx, req, acct.Name, &acct.ServiceAccountId, oldTokenGen.KeyName)
@@ -68,7 +70,7 @@ func (b *backend) pathStaticAccountRotateKey(ctx context.Context, req *logical.R
 		return nil, err
 	}
 
-	newTokenGen, err := b.createNewTokenGen(ctx, req, acct.ResourceName(), scopes)
+	newTokenGen, err := b.createNewTokenGen(ctx, req, acct.ResourceName(), scopes, audience)
 	if err != nil {
 		return nil, err
 	}

@@ -32,8 +32,14 @@ type RoleSet struct {
 	RawBindings string
 	Bindings    ResourceBindings
 
-	AccountId *gcputil.ServiceAccountId
-	TokenGen  *TokenGenerator
+	AccountId     *gcputil.ServiceAccountId
+	TokenGen      *TokenGenerator
+	SecretManager *SecretManager
+}
+
+type SecretManager struct {
+	Key     string
+	Project string
 }
 
 // boundResources is a helper method to get the bound gcpAccountResources
@@ -78,6 +84,18 @@ func (rs *RoleSet) validate() error {
 		} else if len(rs.TokenGen.Scopes) == 0 {
 			err = multierror.Append(err, fmt.Errorf("access token role set should have defined scopes"))
 		}
+	case SecretTypeIdToken:
+		if rs.TokenGen == nil {
+			err = multierror.Append(err, fmt.Errorf("id token role set should have initialized token generator"))
+		} else if rs.TokenGen.Audience == "" {
+			err = multierror.Append(err, fmt.Errorf("id token role set should have defined scopes"))
+		}
+	case SecretTypeJwtAccessToken:
+		if rs.TokenGen == nil {
+			err = multierror.Append(err, fmt.Errorf("jwt access token role set should have initialized token generator"))
+		} else if rs.TokenGen.Audience == "" {
+			err = multierror.Append(err, fmt.Errorf("jwt access token role set should have defined scopes"))
+		}
 	case SecretTypeKey:
 		break
 	default:
@@ -119,7 +137,7 @@ func (b *backend) getServiceAccount(iamAdmin *iam.Service, accountId *gcputil.Se
 
 // saveRoleSetWithNewAccount rotates the role set service account. This includes creating a new service account with
 // a new name and deleting the old service account, updating keys or bindings as required.
-func (b *backend) saveRoleSetWithNewAccount(ctx context.Context, req *logical.Request, rs *RoleSet, project string, newBinds ResourceBindings, scopes []string) (warnings []string, err error) {
+func (b *backend) saveRoleSetWithNewAccount(ctx context.Context, req *logical.Request, rs *RoleSet, project string, newBinds ResourceBindings, scopes []string, audience string) (warnings []string, err error) {
 	b.Logger().Debug("updating roleset with new account")
 
 	oldResources := rs.boundResources()
@@ -138,6 +156,10 @@ func (b *backend) saveRoleSetWithNewAccount(ctx context.Context, req *logical.Re
 	}
 	if len(scopes) > 0 {
 		newResources.tokenGen = &TokenGenerator{Scopes: scopes}
+	}
+
+	if audience != "" {
+		newResources.tokenGen = &TokenGenerator{Audience: audience}
 	}
 
 	// Add WALs for both old and new resources.
@@ -169,8 +191,8 @@ func (b *backend) saveRoleSetWithNewAccount(ctx context.Context, req *logical.Re
 	}
 
 	// Create new token gen if a stubbed tokenGenerator (with scopes) is given.
-	if newResources.tokenGen != nil && len(newResources.tokenGen.Scopes) > 0 {
-		tokenGen, err := b.createNewTokenGen(ctx, req, sa.Name, newResources.tokenGen.Scopes)
+	if newResources.tokenGen != nil && ((len(newResources.tokenGen.Scopes) > 0) || (newResources.tokenGen.Audience != "")) {
+		tokenGen, err := b.createNewTokenGen(ctx, req, sa.Name, newResources.tokenGen.Scopes, newResources.tokenGen.Audience)
 		if err != nil {
 			return nil, err
 		}
@@ -193,7 +215,7 @@ func (b *backend) saveRoleSetWithNewAccount(ctx context.Context, req *logical.Re
 }
 
 // saveRoleSetWithNewTokenKey rotates the role set access_token key and saves it to storage.
-func (b *backend) saveRoleSetWithNewTokenKey(ctx context.Context, req *logical.Request, rs *RoleSet, scopes []string) (warning string, err error) {
+func (b *backend) saveRoleSetWithNewTokenKey(ctx context.Context, req *logical.Request, rs *RoleSet, scopes []string, audience string) (warning string, err error) {
 	if rs.SecretType != SecretTypeAccessToken {
 		return "", fmt.Errorf("a key is not saved or used for non-access-token role set '%s'", rs.Name)
 	}
@@ -207,6 +229,7 @@ func (b *backend) saveRoleSetWithNewTokenKey(ctx context.Context, req *logical.R
 	var oldWalId string
 	if rs.TokenGen != nil {
 		scopes = rs.TokenGen.Scopes
+		audience = rs.TokenGen.Audience
 		oldTokenGen = rs.TokenGen
 		oldWalId, err = b.addWalRoleSetServiceAccountKey(ctx, req, rs.Name, rs.AccountId, oldTokenGen.KeyName)
 		if err != nil {
@@ -222,7 +245,7 @@ func (b *backend) saveRoleSetWithNewTokenKey(ctx context.Context, req *logical.R
 		return "", err
 	}
 
-	newTokenGen, err := b.createNewTokenGen(ctx, req, rs.AccountId.ResourceName(), scopes)
+	newTokenGen, err := b.createNewTokenGen(ctx, req, rs.AccountId.ResourceName(), scopes, audience)
 	if err != nil {
 		return "", err
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/vault-plugin-secrets-gcp/plugin/util"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
+	"google.golang.org/api/iam/v1"
 )
 
 const (
@@ -38,6 +39,10 @@ func pathRoleSet(b *backend) *framework.Path {
 			"token_scopes": {
 				Type:        framework.TypeCommaStringSlice,
 				Description: `List of OAuth scopes to assign to credentials generated under this role set`,
+			},
+			"audience": {
+				Type:        framework.TypeString,
+				Description: `Audience field for the id_token, jwtAccessToken`,
 			},
 		},
 		ExistenceCheck: b.pathRoleSetExistenceCheck("name"),
@@ -151,9 +156,65 @@ func (b *backend) pathRoleSetRead(ctx context.Context, req *logical.Request, d *
 		data["token_scopes"] = rs.TokenGen.Scopes
 	}
 
+	if rs.TokenGen != nil && (rs.SecretType == SecretTypeIdToken || rs.SecretType == SecretTypeJwtAccessToken) {
+		data["audience"] = rs.TokenGen.Audience
+	}
+
 	return &logical.Response{
 		Data: data,
 	}, nil
+}
+
+func (rs *RoleSet) newKeyForIdTokenGen(ctx context.Context, s logical.Storage, iamAdmin *iam.Service, audience string) (string, error) {
+	walId, err := framework.PutWAL(ctx, s, walTypeAccountKey, &walAccountKey{
+		RoleSet:            rs.Name,
+		KeyName:            "",
+		ServiceAccountName: rs.AccountId.ResourceName(),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	key, err := iamAdmin.Projects.ServiceAccounts.Keys.Create(rs.AccountId.ResourceName(),
+		&iam.CreateServiceAccountKeyRequest{
+			PrivateKeyType: privateKeyTypeJson,
+		}).Do()
+	if err != nil {
+		framework.DeleteWAL(ctx, s, walId)
+		return "", err
+	}
+	rs.TokenGen = &TokenGenerator{
+		KeyName:    key.Name,
+		B64KeyJSON: key.PrivateKeyData,
+		Audience:   audience,
+	}
+	return walId, nil
+}
+
+func (rs *RoleSet) newKeyForJwtAccessTokenGen(ctx context.Context, s logical.Storage, iamAdmin *iam.Service, audience string) (string, error) {
+	walId, err := framework.PutWAL(ctx, s, walTypeAccountKey, &walAccountKey{
+		RoleSet:            rs.Name,
+		KeyName:            "",
+		ServiceAccountName: rs.AccountId.ResourceName(),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	key, err := iamAdmin.Projects.ServiceAccounts.Keys.Create(rs.AccountId.ResourceName(),
+		&iam.CreateServiceAccountKeyRequest{
+			PrivateKeyType: privateKeyTypeJson,
+		}).Do()
+	if err != nil {
+		framework.DeleteWAL(ctx, s, walId)
+		return "", err
+	}
+	rs.TokenGen = &TokenGenerator{
+		KeyName:    key.Name,
+		B64KeyJSON: key.PrivateKeyData,
+		Audience:   audience,
+	}
+	return walId, nil
 }
 
 func (b *backend) pathRoleSetDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (resp *logical.Response, err error) {
@@ -220,7 +281,7 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 	if isCreate {
 		secretType := d.Get("secret_type").(string)
 		switch secretType {
-		case SecretTypeKey, SecretTypeAccessToken:
+		case SecretTypeKey, SecretTypeAccessToken, SecretTypeIdToken, SecretTypeJwtAccessToken:
 			rs.SecretType = secretType
 		default:
 			return logical.ErrorResponse(`invalid "secret_type" value: "%s"`, secretType), nil
@@ -271,7 +332,27 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 			scopes = rs.TokenGen.Scopes
 		}
 	}
-
+	// Default audiences
+	var audience string
+	audienceRaw, ok := d.GetOk("audience")
+	if ok {
+		if rs.SecretType != SecretTypeIdToken && rs.SecretType != SecretTypeJwtAccessToken {
+			warnings = []string{
+				fmt.Sprintf("ignoring audience, only valid for '%s' secret type role set", SecretTypeIdToken),
+			}
+		}
+		audience = audienceRaw.(string)
+		if len(audience) == 0 {
+			return logical.ErrorResponse("cannot provide empty audience"), nil
+		}
+	} else if rs.SecretType == SecretTypeIdToken || rs.SecretType == SecretTypeJwtAccessToken {
+		if isCreate {
+			return logical.ErrorResponse("audience must be provided for creating id token role set"), nil
+		}
+		if rs.TokenGen != nil {
+			audience = rs.TokenGen.Audience
+		}
+	}
 	// Bindings
 	bRaw, newBindings := d.GetOk("bindings")
 
@@ -313,7 +394,7 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 	}
 	rs.RawBindings = bRaw.(string)
 
-	updateWarns, err := b.saveRoleSetWithNewAccount(ctx, req, rs, project, bindings, scopes)
+	updateWarns, err := b.saveRoleSetWithNewAccount(ctx, req, rs, project, bindings, scopes, audience)
 	if updateWarns != nil {
 		warnings = append(warnings, updateWarns...)
 	}
@@ -348,11 +429,13 @@ func (b *backend) pathRoleSetRotateAccount(ctx context.Context, req *logical.Req
 	}
 
 	var scopes []string
+	var audience string
 	if rs.TokenGen != nil {
 		scopes = rs.TokenGen.Scopes
+		audience = rs.TokenGen.Audience
 	}
 
-	warnings, err := b.saveRoleSetWithNewAccount(ctx, req, rs, rs.AccountId.Project, rs.Bindings, scopes)
+	warnings, err := b.saveRoleSetWithNewAccount(ctx, req, rs, rs.AccountId.Project, rs.Bindings, scopes, audience)
 	if err != nil {
 		return logical.ErrorResponse(err.Error()), nil
 	} else if warnings != nil && len(warnings) > 0 {
@@ -378,11 +461,13 @@ func (b *backend) pathRoleSetRotateKey(ctx context.Context, req *logical.Request
 	if rs.SecretType != SecretTypeAccessToken {
 		return logical.ErrorResponse("cannot rotate key for non-access-token role set"), nil
 	}
+	var audience string
 	var scopes []string
 	if rs.TokenGen != nil {
 		scopes = rs.TokenGen.Scopes
+		audience = rs.TokenGen.Audience
 	}
-	warn, err := b.saveRoleSetWithNewTokenKey(ctx, req, rs, scopes)
+	warn, err := b.saveRoleSetWithNewTokenKey(ctx, req, rs, scopes, audience)
 	if err != nil {
 		return logical.ErrorResponse(err.Error()), nil
 	}

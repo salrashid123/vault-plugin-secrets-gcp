@@ -85,11 +85,15 @@ func Backend() *backend {
 				pathStaticAccountRotateKey(b),
 				pathStaticAccountSecretAccessToken(b),
 				pathStaticAccountSecretServiceAccountKey(b),
+				pathSecretIdToken(b),
+				pathSecretJwtAccessToken(b),
 			},
 		),
 		Secrets: []*framework.Secret{
 			secretAccessToken(b),
 			secretServiceAccountKey(b),
+			secretIdToken(b),
+			secretJwtAccessToken(b),
 		},
 
 		Invalidate:        b.invalidate,
