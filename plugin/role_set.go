@@ -32,14 +32,8 @@ type RoleSet struct {
 	RawBindings string
 	Bindings    ResourceBindings
 
-	AccountId     *gcputil.ServiceAccountId
-	TokenGen      *TokenGenerator
-	SecretManager *SecretManager
-}
-
-type SecretManager struct {
-	Key     string
-	Project string
+	AccountId *gcputil.ServiceAccountId
+	TokenGen  *TokenGenerator
 }
 
 // boundResources is a helper method to get the bound gcpAccountResources
@@ -69,11 +63,11 @@ func (rs *RoleSet) validate() error {
 		err = multierror.Append(err, fmt.Errorf("role set should have account associated"))
 	}
 
-	if len(rs.Bindings) == 0 {
+	if len(rs.Bindings) == 0 && rs.SecretType != SecretTypeImpersonatedAccessToken {
 		err = multierror.Append(err, fmt.Errorf("role set bindings cannot be empty"))
 	}
 
-	if len(rs.RawBindings) == 0 {
+	if len(rs.RawBindings) == 0 && rs.SecretType != SecretTypeImpersonatedAccessToken {
 		err = multierror.Append(err, fmt.Errorf("role set raw bindings cannot be empty string"))
 	}
 
@@ -96,6 +90,8 @@ func (rs *RoleSet) validate() error {
 		} else if rs.TokenGen.Audience == "" {
 			err = multierror.Append(err, fmt.Errorf("jwt access token role set should have defined scopes"))
 		}
+	case SecretTypeImpersonatedAccessToken:
+		break
 	case SecretTypeKey:
 		break
 	default:
@@ -137,7 +133,7 @@ func (b *backend) getServiceAccount(iamAdmin *iam.Service, accountId *gcputil.Se
 
 // saveRoleSetWithNewAccount rotates the role set service account. This includes creating a new service account with
 // a new name and deleting the old service account, updating keys or bindings as required.
-func (b *backend) saveRoleSetWithNewAccount(ctx context.Context, req *logical.Request, rs *RoleSet, project string, newBinds ResourceBindings, scopes []string, audience string) (warnings []string, err error) {
+func (b *backend) saveRoleSetWithNewAccount(ctx context.Context, req *logical.Request, rs *RoleSet, project string, newBinds ResourceBindings, scopes []string, audience string, targetServiceAccount string, delegates []string, lifetime time.Duration) (warnings []string, err error) {
 	b.Logger().Debug("updating roleset with new account")
 
 	oldResources := rs.boundResources()
@@ -178,31 +174,43 @@ func (b *backend) saveRoleSetWithNewAccount(ctx context.Context, req *logical.Re
 		return nil, err
 	}
 
-	// Created new RoleSet resources
-	// Create new service account
-	sa, err := b.createServiceAccount(ctx, req, newResources.accountId.Project, newSaName, fmt.Sprintf("role set %s", rs.Name))
-	if err != nil {
-		return nil, err
-	}
+	if rs.SecretType != SecretTypeImpersonatedAccessToken {
 
-	// Create new IAM bindings.
-	if err := b.createIamBindings(ctx, req, sa.Email, newResources.bindings); err != nil {
-		return nil, err
-	}
-
-	// Create new token gen if a stubbed tokenGenerator (with scopes) is given.
-	if newResources.tokenGen != nil && ((len(newResources.tokenGen.Scopes) > 0) || (newResources.tokenGen.Audience != "")) {
-		tokenGen, err := b.createNewTokenGen(ctx, req, sa.Name, newResources.tokenGen.Scopes, newResources.tokenGen.Audience)
+		// Created new RoleSet resources
+		// Create new service account
+		sa, err := b.createServiceAccount(ctx, req, newResources.accountId.Project, newSaName, fmt.Sprintf("role set %s", rs.Name))
 		if err != nil {
 			return nil, err
 		}
-		newResources.tokenGen = tokenGen
-	}
 
+		// Create new IAM bindings.
+		if err := b.createIamBindings(ctx, req, sa.Email, newResources.bindings); err != nil {
+			return nil, err
+		}
+
+		// Create new token gen if a stubbed tokenGenerator (with scopes) is given.
+		if newResources.tokenGen != nil && ((len(newResources.tokenGen.Scopes) > 0) || (newResources.tokenGen.Audience != "")) {
+			tokenGen, err := b.createNewTokenGen(ctx, req, sa.Name, newResources.tokenGen.Scopes, newResources.tokenGen.Audience)
+			if err != nil {
+				return nil, err
+			}
+			newResources.tokenGen = tokenGen
+		}
+	}
 	// Edit roleset with new resources and save to storage.
 	rs.AccountId = &newResources.accountId
-	rs.Bindings = newResources.bindings
-	rs.TokenGen = newResources.tokenGen
+
+	if rs.SecretType == SecretTypeImpersonatedAccessToken {
+		rs.TokenGen = &TokenGenerator{
+			TargetServiceAccount: targetServiceAccount,
+			Scopes:               scopes,
+			Delegates:            delegates,
+			Lifetime:             lifetime,
+		}
+	} else {
+		rs.Bindings = newResources.bindings
+		rs.TokenGen = newResources.tokenGen
+	}
 	if err := rs.save(ctx, req.Storage); err != nil {
 		return nil, err
 	}

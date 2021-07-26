@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"time"
 
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/go-gcp-common/gcputil"
@@ -37,10 +38,13 @@ type (
 
 	// TokenGenerator wraps the service account key and params required to create access tokens.
 	TokenGenerator struct {
-		KeyName    string
-		B64KeyJSON string
-		Scopes     []string
-		Audience   string
+		KeyName              string
+		B64KeyJSON           string
+		Scopes               []string
+		Audience             string
+		TargetServiceAccount string
+		Delegates            []string
+		Lifetime             time.Duration
 	}
 )
 

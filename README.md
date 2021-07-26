@@ -1,4 +1,4 @@
-# Vault Secrets Plugin for GCP OIDC and JWTAccess Tokens
+# Vault Secrets Plugin for Service Account Impersonation, GCP OIDC and JWTAccess Tokens
 
 
 Fork of [vault-plugin-secrets-gcp](https://github.com/hashicorp/vault-plugin-secrets-gcp)
@@ -164,10 +164,88 @@ gives JWTAccessToken of form
   "sub": "vaultmy-jwttoken-ro-1626810752@pubsub-msg.iam.gserviceaccount.com"
 }
 ```
+
+
+
+## Impersonated
+
+Returns an access token that impersonates another *existing* service account. 
+
+
+
+Unlike all the other secrets in this repo, this mode does not create a new temporary service account but instead impersonates an existing service account and returns an access token for that.
+
+For more information, see
+
+* [Creating short-lived service account credentials](https://cloud.google.com/iam/docs/creating-short-lived-service-account-credentials)
+* [projects.serviceAccounts.generateAccessToken](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken)
+
+
+To use this mode, Vault must have permissions impersonate the target account.
+
+For example, if you run vault as `serviceAccount:vault-root-account@someproject.iam.gserviceaccount.com`, you must first manually grant the permission for it to impersonated the target account you wish to return a token for  (eg `impersonated-account@anotherproject.iam.gserviceaccount.com`)
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding \
+  impersonated-account@anotherproject.iam.gserviceaccount.com  \
+  --project mineral-minutia-820 \
+  --member serviceAccount:serviceAccount:vault-root-account@project.iam.gserviceaccount.com \
+  --role roles/iam.serviceAccountTokenCreator
+```
+
+
+Once thats done, deploy and create a roleset that allows impersonation:
+
+```bash
+vault write gcp/roleset/my-impersonated-roleset    \
+   project="someproject"   \
+   secret_type="impersonated_access_token"  \
+   impersonation_target="impersonated-account@anotherproject.iam.gserviceaccount.com" \
+   token_scopes="https://www.googleapis.com/auth/cloud-platform" \
+   impersonation_delegates="" \
+   impersonation_lifetime="30s"   
+
+
+vault policy write impersonated-policy -<<EOF
+path "gcp/impersonatedtoken/my-impersonated-roleset" {
+    capabilities = ["read"]
+}
+EOF
+
+vault token create -policy=impersonated-policy
+```
+
+Use the token
+
+```bash
+export VAULT_ADDR='http://localhost:8200'
+export VAULT_TOKEN=s.WwOrScSUbYbyEkQvtBaDGuR2
+
+vault read gcp/impersonatedtoken/my-impersonated-roleset
+```
+
+
+What you'll see is an `impersonated_access_token` which represents `impersonation_target`
+
+```bash
+$ vault read gcp/impersonatedtoken/my-impersonated-roleset
+Key                          Value
+---                          -----
+expires_at_seconds           1627310447
+impersonated_access_token    ya29.c.KtE....
+token_ttl                    29s
+
+
+curl -H "Authorization: Bearer $TOKEN"  https://storage.googleapis.com/storage/v1/b/$YOUR_PROJECT/o/$YOUR_OBJECT
+```
+
+
 ### DELETE
 
 ```bash
 vault delete gcp/roleset/my-jwttoken-roleset
 
 vault delete gcp/roleset/my-idtoken-roleset
+
+vault delete gcp/roleset/my-impersonated-roleset
 ```

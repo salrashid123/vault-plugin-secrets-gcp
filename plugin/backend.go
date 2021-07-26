@@ -87,6 +87,7 @@ func Backend() *backend {
 				pathStaticAccountSecretServiceAccountKey(b),
 				pathSecretIdToken(b),
 				pathSecretJwtAccessToken(b),
+				pathSecretImpersonatedAccessToken(b),
 			},
 		),
 		Secrets: []*framework.Secret{
@@ -94,6 +95,7 @@ func Backend() *backend {
 			secretServiceAccountKey(b),
 			secretIdToken(b),
 			secretJwtAccessToken(b),
+			secretImpersonatedAccessToken(b),
 		},
 
 		Invalidate:        b.invalidate,
@@ -145,6 +147,10 @@ func (b *backend) HTTPClient(s logical.Storage) (*http.Client, error) {
 	}
 
 	return client.(*http.Client), nil
+}
+
+func (b *backend) GetCredentials(s logical.Storage) (*google.Credentials, error) {
+	return b.credentials(s)
 }
 
 // credentials returns the credentials which were specified in the

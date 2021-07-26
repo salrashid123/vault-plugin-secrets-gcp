@@ -116,6 +116,10 @@ func (b *backend) createStaticAccount(ctx context.Context, req *logical.Request,
 		return err
 	}
 
+	if input.secretType == SecretTypeImpersonatedAccessToken {
+		return nil
+	}
+
 	gcpAcct, err := b.getServiceAccount(iamAdmin, &gcputil.ServiceAccountId{
 		Project:   gcpServiceAccountInferredProject,
 		EmailOrId: input.serviceAccountEmail,
@@ -189,6 +193,10 @@ func (b *backend) updateStaticAccount(ctx context.Context, req *logical.Request,
 	iamAdmin, err := b.IAMAdminClient(req.Storage)
 	if err != nil {
 		return nil, err
+	}
+
+	if a.SecretType == SecretTypeImpersonatedAccessToken {
+		return nil, nil
 	}
 
 	_, err = b.getServiceAccount(iamAdmin, &a.ServiceAccountId)

@@ -3,6 +3,7 @@ package gcpsecrets
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/vault-plugin-secrets-gcp/plugin/util"
@@ -43,6 +44,18 @@ func pathRoleSet(b *backend) *framework.Path {
 			"audience": {
 				Type:        framework.TypeString,
 				Description: `Audience field for the id_token, jwtAccessToken`,
+			},
+			"impersonation_target": {
+				Type:        framework.TypeString,
+				Description: `Impersonation Target`,
+			},
+			"impersonation_delegates": {
+				Type:        framework.TypeCommaStringSlice,
+				Description: `List of delegatesin the chain to impersonate`,
+			},
+			"impersonation_lifetime": {
+				Type:        framework.TypeDurationSecond,
+				Description: `List of how long the token should be valid for`,
 			},
 		},
 		ExistenceCheck: b.pathRoleSetExistenceCheck("name"),
@@ -158,6 +171,13 @@ func (b *backend) pathRoleSetRead(ctx context.Context, req *logical.Request, d *
 
 	if rs.TokenGen != nil && (rs.SecretType == SecretTypeIdToken || rs.SecretType == SecretTypeJwtAccessToken) {
 		data["audience"] = rs.TokenGen.Audience
+	}
+
+	if rs.SecretType == SecretTypeImpersonatedAccessToken {
+		data["impersonation_target"] = rs.TokenGen.TargetServiceAccount
+		data["token_scopes"] = rs.TokenGen.Scopes
+		data["impersonation_delegates"] = rs.TokenGen.Delegates
+		data["impersonation_lifetime"] = rs.TokenGen.Lifetime
 	}
 
 	return &logical.Response{
@@ -281,7 +301,7 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 	if isCreate {
 		secretType := d.Get("secret_type").(string)
 		switch secretType {
-		case SecretTypeKey, SecretTypeAccessToken, SecretTypeIdToken, SecretTypeJwtAccessToken:
+		case SecretTypeKey, SecretTypeAccessToken, SecretTypeIdToken, SecretTypeJwtAccessToken, SecretTypeImpersonatedAccessToken:
 			rs.SecretType = secretType
 		default:
 			return logical.ErrorResponse(`invalid "secret_type" value: "%s"`, secretType), nil
@@ -315,7 +335,7 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 	var scopes []string
 	scopesRaw, ok := d.GetOk("token_scopes")
 	if ok {
-		if rs.SecretType != SecretTypeAccessToken {
+		if rs.SecretType != SecretTypeAccessToken && rs.SecretType != SecretTypeImpersonatedAccessToken {
 			warnings = []string{
 				fmt.Sprintf("ignoring token_scopes, only valid for '%s' secret type role set", SecretTypeAccessToken),
 			}
@@ -324,7 +344,7 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 		if len(scopes) == 0 {
 			return logical.ErrorResponse("cannot provide empty token_scopes"), nil
 		}
-	} else if rs.SecretType == SecretTypeAccessToken {
+	} else if rs.SecretType == SecretTypeAccessToken || rs.SecretType == SecretTypeImpersonatedAccessToken {
 		if isCreate {
 			return logical.ErrorResponse("token_scopes must be provided for creating access token role set"), nil
 		}
@@ -353,10 +373,55 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 			audience = rs.TokenGen.Audience
 		}
 	}
+	var targetServiceAccount string
+	var delegates []string
+	if rs.SecretType == SecretTypeImpersonatedAccessToken {
+
+		targetServiceAccountRaw, ok := d.GetOk("impersonation_target")
+		if ok {
+			targetServiceAccount = targetServiceAccountRaw.(string)
+			if len(targetServiceAccount) == 0 {
+				return logical.ErrorResponse("cannot provide empty targetServiceAccount"), nil
+			}
+			if rs.TokenGen != nil {
+				targetServiceAccount = rs.TokenGen.TargetServiceAccount
+				delegates = rs.TokenGen.Delegates
+			}
+
+			delegateList := []string{}
+			delegatesRaw, ok := d.GetOk("delegates")
+			if ok {
+				if len(delegatesRaw.([]string)) > 0 {
+					delegateList = delegatesRaw.([]string)
+				}
+			}
+
+			var lifetime time.Duration
+			lifetimeRaw, ok := d.GetOk("impersonation_lifetime")
+			if ok {
+				lifetime = time.Duration(lifetimeRaw.(int)) * time.Second
+			} else {
+				lifetime = time.Duration(3600) * time.Second
+			}
+
+			updateWarns, err := b.saveRoleSetWithNewAccount(ctx, req, rs, project, nil, scopes, "", targetServiceAccount, delegateList, lifetime)
+			if updateWarns != nil {
+				warnings = append(warnings, updateWarns...)
+			}
+			if err != nil {
+				return logical.ErrorResponse(err.Error()), nil
+			} else if warnings != nil && len(warnings) > 0 {
+				return &logical.Response{Warnings: warnings}, nil
+			}
+		} else {
+			return logical.ErrorResponse("targetServiceAccount must be provided for creating impersonated token role set"), nil
+		}
+		return nil, nil
+	}
 	// Bindings
 	bRaw, newBindings := d.GetOk("bindings")
 
-	if newBindings {
+	if newBindings && rs.SecretType != SecretTypeImpersonatedAccessToken {
 		bindings, ok := bRaw.(string)
 		if !ok {
 			return logical.ErrorResponse("bindings are not a string"), nil
@@ -366,7 +431,7 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 		}
 	}
 
-	if isCreate && !newBindings {
+	if isCreate && !newBindings && rs.SecretType != SecretTypeImpersonatedAccessToken {
 		return logical.ErrorResponse("bindings are required for new role set"), nil
 	}
 
@@ -394,7 +459,7 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 	}
 	rs.RawBindings = bRaw.(string)
 
-	updateWarns, err := b.saveRoleSetWithNewAccount(ctx, req, rs, project, bindings, scopes, audience)
+	updateWarns, err := b.saveRoleSetWithNewAccount(ctx, req, rs, project, bindings, scopes, audience, targetServiceAccount, delegates, time.Duration(3600*time.Second))
 	if updateWarns != nil {
 		warnings = append(warnings, updateWarns...)
 	}
@@ -435,7 +500,7 @@ func (b *backend) pathRoleSetRotateAccount(ctx context.Context, req *logical.Req
 		audience = rs.TokenGen.Audience
 	}
 
-	warnings, err := b.saveRoleSetWithNewAccount(ctx, req, rs, rs.AccountId.Project, rs.Bindings, scopes, audience)
+	warnings, err := b.saveRoleSetWithNewAccount(ctx, req, rs, rs.AccountId.Project, rs.Bindings, scopes, audience, "", []string{""}, time.Duration(3600*time.Second))
 	if err != nil {
 		return logical.ErrorResponse(err.Error()), nil
 	} else if warnings != nil && len(warnings) > 0 {
