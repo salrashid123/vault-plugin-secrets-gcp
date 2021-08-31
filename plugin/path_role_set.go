@@ -375,6 +375,7 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 	}
 	var targetServiceAccount string
 	var delegates []string
+	lifetime := time.Duration(3600 * time.Second)
 	if rs.SecretType == SecretTypeImpersonatedAccessToken {
 
 		targetServiceAccountRaw, ok := d.GetOk("impersonation_target")
@@ -396,7 +397,6 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 				}
 			}
 
-			var lifetime time.Duration
 			lifetimeRaw, ok := d.GetOk("impersonation_lifetime")
 			if ok {
 				lifetime = time.Duration(lifetimeRaw.(int)) * time.Second
@@ -459,7 +459,7 @@ func (b *backend) pathRoleSetCreateUpdate(ctx context.Context, req *logical.Requ
 	}
 	rs.RawBindings = bRaw.(string)
 
-	updateWarns, err := b.saveRoleSetWithNewAccount(ctx, req, rs, project, bindings, scopes, audience, targetServiceAccount, delegates, time.Duration(3600*time.Second))
+	updateWarns, err := b.saveRoleSetWithNewAccount(ctx, req, rs, project, bindings, scopes, audience, targetServiceAccount, delegates, lifetime)
 	if updateWarns != nil {
 		warnings = append(warnings, updateWarns...)
 	}
@@ -495,12 +495,14 @@ func (b *backend) pathRoleSetRotateAccount(ctx context.Context, req *logical.Req
 
 	var scopes []string
 	var audience string
+	duration := time.Duration(3600 * time.Second)
 	if rs.TokenGen != nil {
 		scopes = rs.TokenGen.Scopes
 		audience = rs.TokenGen.Audience
+		duration = rs.TokenGen.Lifetime
 	}
 
-	warnings, err := b.saveRoleSetWithNewAccount(ctx, req, rs, rs.AccountId.Project, rs.Bindings, scopes, audience, "", []string{""}, time.Duration(3600*time.Second))
+	warnings, err := b.saveRoleSetWithNewAccount(ctx, req, rs, rs.AccountId.Project, rs.Bindings, scopes, audience, "", []string{""}, duration)
 	if err != nil {
 		return logical.ErrorResponse(err.Error()), nil
 	} else if warnings != nil && len(warnings) > 0 {
